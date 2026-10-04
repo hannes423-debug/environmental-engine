@@ -1,0 +1,37 @@
+# Environmental Engine
+
+Modular 2D tree art inside a lightweight 3D simulation. Everything runs from one
+self-contained file, `index(1).html` (engine, a trimmed three.js and base64 WebP
+atlases), with no build step and no network fetches.
+
+Open the file directly, or serve the folder:
+
+```bash
+python3 -m http.server 8000
+# http://localhost:8000/index(1).html          tree / damage lab
+# http://localhost:8000/index(1).html#world    2.5D world testbed
+# http://localhost:8000/index(1).html#assets   testbed with the asset browser
+```
+
+## What it does
+
+- Four species (oak, pine, birch, spruce) grown from one shared generator; each
+  species is data plus an art atlas.
+- Damage lives in overlays on the intact art: cuts, cracks, burns, breaks.
+- Slash limbs off, throw rocks, fell trunks through a notch, then buck the
+  fallen log into pieces. Cuts clip the same sprite live and add sawn faces.
+- Wind, rain, particles, rigid-body debris.
+
+## Self-tests
+
+- Lab: Debug › Self-test (19 steps, including felling).
+- World testbed (`#world`): Debug › Self-test (12 steps).
+
+## Art pipeline
+
+`tools/pack_spruce.py` cuts the spruce set out of the source sheet
+(`~/Kuvat/spruce.jpeg`, not in the repo): keys the black background, orients each
+sprite, measures anchors, spines, forks and clip spans, and packs
+`tools/spruce.webp` + `tools/spruce.meta.json`. `tools/embed.py` then rewrites
+the `window.TREE_ART.spruce` block in the html. `ART-BRIEF.md` lists the art the
+engine still needs.
