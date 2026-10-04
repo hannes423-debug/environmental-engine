@@ -1,6 +1,6 @@
 import json, base64
 import os; S=os.path.dirname(os.path.abspath(__file__))+'/'
-p=S+'../index(1).html'; L=open(p,encoding='utf8').read().split('\n')
+p=S+'../index.html'; L=open(p,encoding='utf8').read().split('\n')
 a=L.index('window.TREE_ART.spruce = {'); b=a
 while L[b]!='};': b+=1
 meta=json.load(open(S+'spruce.meta.json'))
