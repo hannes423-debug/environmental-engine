@@ -187,9 +187,13 @@
   .tb-thumbs canvas { width: 56px; height: 56px; background: repeating-conic-gradient(#e7e9e0 0% 25%, #f7f8f2 0% 50%) 0 0 / 12px 12px; border-radius: 4px; }
   .tb-thumbs small { font-size: 10px; max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tb-legend { font-size: 11px; line-height: 1.8; color: var(--ink-soft); }
+  #tb-bsearch { width: 100%; height: 32px; margin: 2px 0 6px; padding: 0 9px; box-sizing: border-box; border-radius: 8px; border: 1px solid var(--chip-line);
+    background: rgba(255, 255, 255, 0.75); color: var(--ink); font: 13px system-ui, sans-serif; }
+  .tb-slots { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 4px; }
+  .tb-pb button[disabled] { opacity: 0.45; }
   .tb-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--c); margin: 0 3px 0 6px; vertical-align: -1px; }
   @media (max-width: 420px) {
-    #tb-tools button { width: 48px; } #tb-tools button span { font-size: 11px; }
+    #tb-tools button { width: 43px; } #tb-tools button span { font-size: 10.5px; }
     #tb-top h1 { font-size: 15px; } #tb-top h1 small { display: block; margin: 1px 0 0; font-size: 12px; }
     #tb-panel { top: calc(78px + var(--safe-t)); }
   }
@@ -5171,7 +5175,14 @@ function makeObject(type, o, spec) {
   if (spec.weather !== false && obj.c.render instanceof RenderComponent) obj.add('weather', new WeatherComponent());
   return obj;
 }
-const pickVariant = (o, n, W) => (o.params && o.params.variant != null ? o.params.variant : Math.floor(W.rand() * n)) % n;
+// The chosen variant is written back into the spawn options, so it lands in
+// obj.params: a build ghost, a saved world and an undo all respawn the same art.
+const pickVariant = (o, n, W) => {
+  if (o.params && o.params.variant != null) return o.params.variant % n;
+  const v = Math.floor(W.rand() * n) % n;
+  o.params = { ...(o.params || {}), variant: v };
+  return v;
+};
 
 // ---- vegetation
 for (const sp of ['oak', 'pine', 'birch', 'spruce']) defineType(sp, {
@@ -5593,23 +5604,29 @@ class SpatialWorld extends World {
     g.version++;
   }
   stampFootprint(o) {
-    const fp = o.c.footprint, t = o.transform, g = this.grid, cs = g.cs;
+    const fp = o.c.footprint, g = this.grid;
     fp.cells = [];
-    const mark = (n, fl) => {
+    this.footprintCells(o, (n, fl) => {
       g.flags[n] |= fl;
       if (fl & (CELL.BLOCKED | CELL.PARTIAL) && (!g.obstacle[n] || fl & CELL.BLOCKED)) g.obstacle[n] = o.id;
       fp.cells.push(n);
-    };
+    });
+  }
+  // mark(n, flags) for every cell the footprint covers; writes nothing itself (build ghosts dry-run it)
+  footprintCells(o, mark) {
+    const fp = o.c.footprint, t = o.transform, g = this.grid, cs = g.cs;
     for (const sh of fp.shapes) {
       const fl = FOOT_MODES[sh.mode] || CELL.BLOCKED, min = FOOT_MIN[sh.mode] ?? 0.5, bb = shapeAABB(sh, t);
       const i0 = Math.max(0, Math.floor((bb[0] - g.origin.x) / cs)), i1 = Math.min(g.cols - 1, Math.floor((bb[2] - g.origin.x) / cs));
       const j0 = Math.max(0, Math.floor((bb[1] - g.origin.z) / cs)), j1 = Math.min(g.rows - 1, Math.floor((bb[3] - g.origin.z) / cs));
       let best = -1, bestCov = 0, full = 0;
+      // 4×4 samples per cell; barriers get 8×8, or a 12 cm fence centred in a 0.5 m cell falls between samples and stamps nothing
+      const S = sh.mode === 'wall' ? 8 : 4;
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
         let hit = 0;
-        for (let sj = 0; sj < 4; sj++) for (let si = 0; si < 4; si++) if (shapeContains(sh, t, g.origin.x + (i + (si + 0.5) / 4) * cs, g.origin.z + (j + (sj + 0.5) / 4) * cs)) hit++;
+        for (let sj = 0; sj < S; sj++) for (let si = 0; si < S; si++) if (shapeContains(sh, t, g.origin.x + (i + (si + 0.5) / S) * cs, g.origin.z + (j + (sj + 0.5) / S) * cs)) hit++;
         if (!hit) continue;
-        const cov = hit / 16, n = j * g.cols + i;
+        const cov = hit / (S * S), n = j * g.cols + i;
         if (cov > bestCov) { bestCov = cov; best = n; }
         if (cov >= min) { mark(n, fl); full++; }
         else if (fl & CELL.BLOCKED) mark(n, CELL.PARTIAL | (fl & CELL.BUILDING));
@@ -5962,6 +5979,7 @@ class SpatialWorld extends World {
       R.setBlob(b.shadow, b.com.x, b.com.z, b.extent * 1.4 * (0.6 + 0.4 * lift), 0.45 * lift);
       b.shadow.position.y = gy + 0.02;
     }
+    Build.sync();
     this.terrainView.update(this.env);
     this.grass.update(this.env);
     this.particles.update(dt, t);
@@ -6140,6 +6158,7 @@ SpatialWorld.prototype.loadScenario = function (key) {
   const sc = Scenarios[key];
   if (!sc) throw new Error('Unknown scenario ' + key);
   TB.select(null);
+  Build.reset();
   this.clearAll();
   this.scenario = key;
   this.rng = rng32(hash32(key) + 1);
@@ -6280,8 +6299,8 @@ const TBDebug = {
       g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke();
       if (TB.tool === 'place' && TB.ghost) this.drawFootprint(g, TB.ghost, 0.9);
       if (TB.tool === 'terrain') {
-        const pts = [];
-        for (let i = 0; i < 24; i++) { const a = i / 24 * TAU, x = h.x + Math.cos(a) * 0.9, z = h.z + Math.sin(a) * 0.9; pts.push(new Vector3(x, (W.groundAt(x, z) ?? 0) + 0.04, z)); }
+        const pts = [], rad = TB.brushRad;
+        for (let i = 0; i < 32; i++) { const a = i / 32 * TAU, x = h.x + Math.cos(a) * rad, z = h.z + Math.sin(a) * rad; pts.push(new Vector3(x, (W.groundAt(x, z) ?? 0) + 0.04, z)); }
         this.poly(g, pts); g.strokeStyle = '#fff'; g.setLineDash([4, 3]); g.stroke(); g.setLineDash([]);
       }
       if (S.coords) {
@@ -6291,6 +6310,7 @@ const TBDebug = {
         g.fillStyle = '#fff'; g.fillText(txt, s.x + 7, s.y);
       }
     }
+    if (TB.tool === 'build') Build.draw(g, this);
     g.restore();
     void now;
   },
@@ -6304,17 +6324,19 @@ const TOOL_HINTS = {
   cut: 'Swipe across branches, walls, fences, rocks and bushes',
   poke: 'Tap or brush trees and rocks to push them',
   rock: 'Drag and release to throw a rock from the player',
-  terrain: 'Drag on the ground with the chosen brush',
+  terrain: 'Drag on the ground with the chosen brush · Ctrl+Z undoes a stroke',
+  build: 'Pick from the catalog · tap to place, drag walls and fences into lines, drag plants and rocks to scatter · Q/E rotate · X erase · I pick · Ctrl+Z undo',
 };
 const TB = {
-  tool: 'select', selected: null, placeType: 'pine', placeYaw: 0, snap: true, brushOp: 'raise', panel: 'tool', ghost: null, ghostKey: '',
+  tool: 'select', selected: null, placeType: 'pine', placeYaw: 0, snap: true, brushOp: 'raise', brushRad: 0.9, panel: 'tool', ghost: null, ghostKey: '',
   pointers: new Map(), gesture: null, act: null, statusT: 0, infoT: 0, assetGroup: 'pine',
   init() {
     const root = document.createElement('div');
     root.id = 'tb';
     const tools = [['select', 'Select', 'M5 3l12 9-6 1 3 6-2 1-3-6-4 4z'], ['place', 'Place', 'M12 5v14M5 12h14'], ['walk', 'Walk', 'M13 4a2 2 0 1 1 0 .1M10 21l2-7 3 3v5M8 12l3-4 3 2 3 1'],
       ['cut', 'Cut', 'M5 19C9 17 15 12 19 5M4 20l2-2'], ['poke', 'Poke', 'M12 9.6a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 1 1 0-4.8M12 4v2.5M12 17.5V20M4 12h2.5M17.5 12H20'],
-      ['rock', 'Rock', 'M5 16.5 7 10l5-3.2 5.2 2.1 2 6.4-4.2 3.2H8.6z'], ['terrain', 'Terrain', 'M3 18l6-8 4 5 3-3 5 6z']];
+      ['rock', 'Rock', 'M5 16.5 7 10l5-3.2 5.2 2.1 2 6.4-4.2 3.2H8.6z'], ['terrain', 'Terrain', 'M3 18l6-8 4 5 3-3 5 6z'],
+      ['build', 'Build', 'M4 20h16M6 20V11l6-5 6 5v9M10 20v-5h4v5']];
     root.innerHTML = `
 <header id="tb-top"><h1>Environmental Engine <small>2.5D World Testbed</small></h1><div id="tb-status"></div></header>
 <nav id="tb-side" aria-label="World">
@@ -6337,6 +6359,7 @@ const TB = {
     root.querySelectorAll('[data-tb]').forEach(b => b.addEventListener('click', () => this.action(b.dataset.tb, b)));
     this.bodyEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) this.panelClick(b); });
     this.bodyEl.addEventListener('change', (e) => this.panelChange(e.target));
+    this.bodyEl.addEventListener('input', (e) => { if (e.target.id === 'tb-bsearch') Build.filter(e.target.value); });
     for (const el of root.querySelectorAll('button, #tb-panel')) for (const ev of ['pointerdown', 'touchstart']) el.addEventListener(ev, e => e.stopPropagation(), { passive: true });
     const cv = R.renderer.domElement;
     cv.addEventListener('pointerdown', (e) => this.onDown(e));
@@ -6352,6 +6375,7 @@ const TB = {
     this.setTool('select');
   },
   setTool(t) {
+    if (this.tool === 'build' && t !== 'build') Build.clearGhosts();
     this.tool = t;
     Input.cancelAction();
     if (t === 'cut') Input.mode = 'slash'; else if (t === 'poke') Input.mode = 'poke'; else if (t === 'rock') Input.mode = 'rock';
@@ -6385,7 +6409,7 @@ const TB = {
 <h4>Grid · ${world.grid.cols}×${world.grid.rows} cells · ${world.grid.cs} m · origin (${world.grid.origin.x}, ${world.grid.origin.z})</h4>
 <div class="tb-grid">${this.btn('data-grid="cols"', 'Size: ' + world.grid.cols)}${this.btn('data-grid="cell"', 'Cell: ' + world.grid.cs + ' m')}${this.btn('data-grid="origin"', 'Origin shift')}</div>
 <h4>Camera rule</h4><pre class="tb-info">${JSON.stringify({ type: cameraConfig.type, angle: cameraConfig.angle, rotation: cameraConfig.rotation, zoom: +Cam.zoom.toFixed(2), height: cameraConfig.height }, null, 1).replace(/[{}"]/g, '').trim()}</pre>
-<div class="tb-grid">${this.btn('data-act2="selftest"', 'Self-test')}${this.btn('data-act2="log"', 'Event log')}</div><pre class="tb-info" id="tb-report">${this.report || ''}</pre>`;
+<div class="tb-grid">${this.btn('data-act2="selftest"', 'Self-test')}${this.btn('data-act2="buildtest"', 'Build test')}${this.btn('data-act2="log"', 'Event log')}</div><pre class="tb-info" id="tb-report">${this.report || ''}</pre>`;
     } else if (p === 'assets') {
       title = `Asset registry · ${AssetRegistry.assets.size}`;
       const groups = [...new Set(AssetRegistry.list().map(a => a.group))];
@@ -6403,16 +6427,21 @@ const TB = {
       html = Object.entries(cats).map(([c, l]) => `<h4>${l}</h4><div class="tb-grid">${Object.values(ObjectTypes).filter(t => t.category === c && t.palette).map(t => this.btn(`data-ptype="${t.id}"`, t.label, this.placeType === t.id)).join('')}</div>`).join('') +
         `<h4>Options</h4><div class="tb-grid">${this.btn('data-popt="rot"', `Rotate ${Math.round(this.placeYaw / DEG)}°`)}${this.btn('data-popt="snap"', 'Snap to grid', this.snap)}</div>` +
         (this.placeType === 'sprite' ? `<p class="tb-hint">Placing asset <b>${this.placeAsset}</b></p>` : '');
+    } else if (this.tool === 'build') {
+      ({ title, html } = Build.panel());
     } else if (this.tool === 'terrain') {
       title = 'Terrain brush';
-      html = `<div class="tb-grid">${['raise', 'lower', 'flatten', ...TERRAIN_TYPES.map(t => t.id)].map(k => this.btn(`data-brush="${k}"`, k[0].toUpperCase() + k.slice(1), this.brushOp === k)).join('')}</div><p class="tb-hint">The grid stores height and terrain type per cell; water, steep slopes and mud update the walkmask.</p>`;
+      html = `<div class="tb-grid">${['raise', 'lower', 'flatten', ...TERRAIN_TYPES.map(t => t.id)].map(k => this.btn(`data-brush="${k}"`, k[0].toUpperCase() + k.slice(1), this.brushOp === k)).join('')}</div>
+<h4>Brush size</h4><div class="tb-grid">${[['S', 0.9], ['M', 1.6], ['L', 2.6]].map(([l, r]) => this.btn(`data-brad="${r}"`, `${l} · ${(r * 2).toFixed(1)} m`, this.brushRad === r)).join('')}</div>
+<div class="tb-grid">${this.btn('data-b="undo"', 'Undo' + (Build.undoStack.length ? ' (' + Build.undoStack.length + ')' : ''))}${this.btn('data-b="redo"', 'Redo' + (Build.redoStack.length ? ' (' + Build.redoStack.length + ')' : ''))}</div><p class="tb-hint">The grid stores height and terrain type per cell; water, steep slopes and mud update the walkmask.</p>`;
     } else {
       title = { walk: 'Walk', cut: 'Cut', poke: 'Poke', rock: 'Rock' }[this.tool];
       html = `<p class="tb-hint">${TOOL_HINTS[this.tool]}</p>` + (this.tool === 'walk' ? `<p class="tb-hint">Walker: <b>${this.walker().id}</b>. Joystick / WASD always drives the player.</p>` : '');
     }
     this.titleEl.textContent = title;
     this.bodyEl.innerHTML = html;
-    if (p === 'assets') this.drawThumbs();
+    if (p === 'assets' || (p === 'tool' && this.tool === 'build')) this.drawThumbs();
+    if (p === 'tool' && this.tool === 'build') Build.filter(Build.query);
   },
   drawThumbs() {
     for (const c of this.bodyEl.querySelectorAll('canvas[data-thumb]')) {
@@ -6489,10 +6518,12 @@ const TB = {
       if (d.grid === 'cell') cfg.cellSize = { 0.25: 0.5, 0.5: 1, 1: 0.25 }[g.cs] || 0.5;
       if (d.grid === 'origin') cfg.origin = g.origin.x === 0 ? { x: -2, z: -2 } : { x: 0, z: 0 };
       W.regrid(cfg);
+      Build.reset();
       UI.toast(`Grid ${cfg.cols}×${cfg.rows} · ${cfg.cellSize} m · origin (${cfg.origin.x}, ${cfg.origin.z})`);
       this.renderPanel(); return;
     }
     if (d.act2 === 'selftest') { TBTest.run(); return; }
+    if (d.act2 === 'buildtest') { BuildTest.run(); return; }
     if (d.act2 === 'log') { this.report = W.events.slice(-14).join('\n'); this.renderPanel(); return; }
     if (d.agroup) { this.assetGroup = d.agroup; this.renderPanel(); return; }
     if (d.asset) { this.placeType = 'sprite'; this.placeAsset = d.asset; this.setTool('place'); UI.toast(`Tap the ground to place ${d.asset}`); return; }
@@ -6500,6 +6531,8 @@ const TB = {
     if (d.popt === 'rot') { this.placeYaw = (this.placeYaw + Math.PI / 2) % TAU; this.renderPanel(); return; }
     if (d.popt === 'snap') { this.snap = !this.snap; this.renderPanel(); return; }
     if (d.brush) { this.brushOp = d.brush; this.renderPanel(); return; }
+    if (d.brad) { this.brushRad = +d.brad; this.renderPanel(); return; }
+    if (d.b) { Build.click(b); return; }
     if (d.insp) this.inspect(d.insp);
   },
   panelChange() {},
@@ -6524,7 +6557,7 @@ const TB = {
       if (l) { const b = l.sever({ type: 'slash', clean: true, joint: true, s: l.connection.s }); UI.toast(b ? `${l.id} detached → ${b.id} (a world physics object)` : 'Could not detach'); } else UI.toast('No limbs left');
     } else if (a === 'behave') { const order = ['wander', 'patrol', 'stand']; const nv = o.c.nav; nv.behavior = order[(order.indexOf(nv.behavior) + 1) % 3]; if (nv.behavior === 'patrol' && !nv.patrol) { const p = t.position; nv.patrol = [[p.x - 3, p.z], [p.x + 3, p.z]]; } nv.path = null; nv.idleT = 0; }
     else if (a === 'hit') W.damage(o, 50, { point: W.centerOf(o) });
-    else if (a === 'del') { W.remove(o); this.select(null); return; }
+    else if (a === 'del') { Build.erase([o], 'Delete'); return; }
     this.renderPanel();
   },
   regrow(o) {
@@ -6581,6 +6614,7 @@ const TB = {
     this.lastPlaced = o;
   },
   updateGhost(sx, sy) {
+    if (this.tool === 'build') { this.ghost = null; Build.hover(sx, sy); return; }
     if (this.tool !== 'place') { this.ghost = null; return; }
     const key = this.placeType + ':' + this.placeYaw + ':' + (this.placeAsset || '');
     if (this.ghostKey !== key) {
@@ -6598,9 +6632,12 @@ const TB = {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) { if (down) Input.keys.add(k); else Input.keys.delete(k); if (k.startsWith('arrow')) e.preventDefault(); return; }
     if (!down) return;
-    const tools = ['select', 'place', 'walk', 'cut', 'poke', 'rock', 'terrain'];
-    if (k >= '1' && k <= '7') this.setTool(tools[+k - 1]);
-    else if ((k === 'delete' || k === 'backspace') && this.selected && this.selected !== world.playerObj) { world.remove(this.selected); this.select(null); }
+    if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y')) { e.preventDefault(); if (k === 'y' || e.shiftKey) Build.redo(); else Build.undo(); return; }
+    if (this.tool === 'build' && Build.key(k)) return;
+    const tools = ['select', 'place', 'walk', 'cut', 'poke', 'rock', 'terrain', 'build'];
+    if (k >= '1' && k <= '8') this.setTool(tools[+k - 1]);
+    else if (k === 'b') this.setTool('build');
+    else if ((k === 'delete' || k === 'backspace') && this.selected && this.selected !== world.playerObj) Build.erase([this.selected], 'Delete');
     else if (k === 'r' && this.selected) this.inspect('rot+');
     else if (k === 'g') { TBDebug.show.grid = !TBDebug.show.grid; this.refresh(); }
     else if (k === 'm') { TBDebug.show.walkmask = !TBDebug.show.walkmask; this.refresh(); }
@@ -6654,13 +6691,14 @@ const TB = {
     if (t === 'select') {
       const o = this.pick(p.x, p.y);
       this.act = { id: p.id, type: o && o === this.selected && o !== W.playerObj ? 'drag' : 'tap', obj: o };
-      if (o && this.act.type === 'drag') { const gp = Cam.ground(p.x, p.y); this.act.off = { x: o.transform.position.x - gp.x, z: o.transform.position.z - gp.z }; }
+      if (o && this.act.type === 'drag') { const gp = Cam.ground(p.x, p.y); this.act.off = { x: o.transform.position.x - gp.x, z: o.transform.position.z - gp.z }; this.act.from = { x: o.transform.position.x, z: o.transform.position.z }; }
     } else if (t === 'place' || t === 'walk') this.act = { id: p.id, type: 'tap' };
     else if (t === 'cut' || t === 'poke' || t === 'rock') {
       this.act = { id: p.id, type: 'lab', hit: new Set(), last: { x: p.x, y: p.y, t: performance.now() } };
       Input.beginAction(p);
       if (t === 'poke') this.pokeObjects(p.x, p.y, null, 1);
-    } else if (t === 'terrain') { this.act = { id: p.id, type: 'brush', last: 0 }; this.brushAt(p); }
+    } else if (t === 'terrain') { this.act = { id: p.id, type: 'brush', last: 0, before: Build.terrainSnap() }; this.brushAt(p); }
+    else if (t === 'build') this.act = Build.begin(p);
   },
   moveAct(p, dx, dy) {
     const a = this.act;
@@ -6682,6 +6720,7 @@ const TB = {
         a.last = { x: p.x, y: p.y, t: now };
       }
     } else if (a.type === 'brush') { const now = performance.now(); if (now - a.last > 60) { a.last = now; this.brushAt(p); } }
+    else if (a.type === 'build') Build.move(a, p, dx, dy);
   },
   endAct(p) {
     const a = this.act, W = world;
@@ -6696,13 +6735,25 @@ const TB = {
         if (who.c.nav.behavior !== 'player') who.c.nav.behavior = 'stand';
         UI.toast(W.walkTo(who, gp.x, gp.z) ? `${who.id} walking to X ${gp.x.toFixed(1)} Z ${gp.z.toFixed(1)}` : 'No walkable path there');
       }
-    } else if (a.type === 'drag' && a.moving) { W.rebuildLists(); W.rebuildWalkmask(); this.refresh(); }
+    } else if (a.type === 'drag' && a.moving) {
+      const q = a.obj.transform.position;
+      Build.push({ label: 'Move ' + a.obj.id, moves: [{ id: a.obj.id, from: a.from, to: { x: q.x, z: q.z } }] });
+      W.rebuildLists(); W.rebuildWalkmask(); this.refresh();
+    }
     else if (a.type === 'lab') Input.endAction(p);
+    else if (a.type === 'brush') Build.push({ label: 'Terrain ' + this.brushOp, terrain: { before: a.before, after: Build.terrainSnap() } });
+    else if (a.type === 'build') Build.end(a, p);
   },
-  cancelAct() { if (this.act && this.act.type === 'lab') Input.cancelAction(); this.act = null; },
+  cancelAct() {
+    const a = this.act;
+    if (a && a.type === 'lab') Input.cancelAction();
+    if (a && a.type === 'build') Build.cancel(a);
+    if (a && a.type === 'brush') Build.push({ label: 'Terrain ' + this.brushOp, terrain: { before: a.before, after: Build.terrainSnap() } });
+    this.act = null;
+  },
   brushAt(p) {
     const gp = Cam.ground(p.x, p.y);
-    if (world.grid.insideWorld(gp.x, gp.z)) world.brush(gp.x, gp.z, this.brushOp);
+    if (world.grid.insideWorld(gp.x, gp.z)) world.brush(gp.x, gp.z, this.brushOp, this.brushRad);
   },
   // swipe segment vs the screen bounds of damageable world objects (trees go through the lab's slash)
   slashObjects(a, b, speed, hitSet) {
@@ -6746,6 +6797,645 @@ function segRect(a, b, r) {
   for (let i = 0; i <= 8; i++) { const x = lerp(a.x, b.x, i / 8), y = lerp(a.y, b.y, i / 8); if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return true; }
   return false;
 }
+
+/* ---------------------------------------------------------------- build mode */
+// Terra's builder (the Godot "Terra 3D · RPG Builder", World.gd build mode:
+// catalog, grid placement, terrain editing) ported onto the testbed's object
+// model. A translucent ghost previews the piece and turns red where it cannot
+// go; walls, fences and posts drag into lines, plants and rocks drag into a
+// scatter; erase and pick (eyedropper) modes; undo / redo for every build,
+// terrain stroke and move; three save slots plus JSON export / import.
+// A save holds the layout (types, transforms, params, terrain), not damage:
+// trees regrow intact from their seed.
+const BUILD_LINE = { wall: 2, door: 2, window: 2, fence: 2, pillar: 2 };
+const BUILD_SCATTER = { oak: 2.6, pine: 2.4, birch: 2.2, spruce: 2.4, bush: 1.3, plant: 0.7, grass: 0.9, rock_s: 0.9, rock_m: 1.6, rock_l: 2.4, branch: 1.5, log: 2.6, stump: 1.6, npc: 1.5, sprite: 1.0 };
+const BUILD_SPIN = new Set(['rock_s', 'rock_m', 'rock_l', 'branch', 'log', 'stump']);   // scatter gives these a random yaw
+const BUILD_CATS = { all: 'All', vegetation: 'Vegetation', natural: 'Natural', building: 'Building', characters: 'Characters', sprites: 'Sprites' };
+const BUILD_SLOT = 'ee.build.slot.';
+const BUILD_FORMAT = 'environmental-engine-world';
+const GHOST_OK = [0.85, 1.15, 0.9], GHOST_BAD = [1.6, 0.5, 0.45];
+
+const Build = {
+  mode: 'place', cat: 'all', query: '', recent: [], allowOverlap: false,
+  params: null,            // eyedropper copy: every placement repeats these params until a catalog pick
+  ghosts: [], ghostKey: '', hoverScreen: null, undoStack: [], redoStack: [],
+  reset() { this.clearGhosts(); this.undoStack = []; this.redoStack = []; },
+  // ---- catalog ---------------------------------------------------------------
+  catalog() {
+    const out = Object.values(ObjectTypes).filter(t => t.palette).map(t => ({ key: t.id, type: t.id, label: t.label, cat: t.category }));
+    for (const a of AssetRegistry.list()) out.push({ key: 'sprite:' + a.id, type: 'sprite', asset: a.id, label: a.id, cat: 'sprites', group: a.group });
+    return out;
+  },
+  curKey() { return TB.placeType === 'sprite' ? 'sprite:' + TB.placeAsset : TB.placeType; },
+  curLabel() { return TB.placeType === 'sprite' ? TB.placeAsset : ObjectTypes[TB.placeType].label; },
+  baseParams() { return TB.placeType === 'sprite' ? { asset: TB.placeAsset } : null; },
+  kind() {
+    if (this.mode !== 'place') return this.mode;
+    const t = TB.placeType;
+    if (BUILD_LINE[t]) return 'line';
+    if (this.params) return 'single';
+    return BUILD_SCATTER[t] ? 'scatter' : 'single';
+  },
+  choose(key) {
+    const it = this.catalog().find(c => c.key === key);
+    if (!it) return false;
+    TB.placeType = it.type;
+    if (it.asset) TB.placeAsset = it.asset;
+    this.params = null;
+    this.recent = [key, ...this.recent.filter(k => k !== key)].slice(0, 6);
+    this.mode = 'place';
+    this.clearGhosts();
+    return true;
+  },
+  // ---- panel -------------------------------------------------------------------
+  itemHtml(it, cur) {
+    if (it.type === 'sprite') return `<button data-b="pick" data-key="${it.key}" aria-pressed="${cur === it.key}" title="${it.label}"><canvas width="56" height="56" data-thumb="${it.asset}"></canvas><small>${it.label.replace(/^(oak|pine|birch|spruce)_/, '')}</small></button>`;
+    return TB.btn(`data-b="pick" data-key="${it.key}"`, it.label, cur === it.key);
+  },
+  listHtml() {
+    const all = this.catalog(), cur = this.curKey(), q = this.query.trim().toLowerCase();
+    const grid = (items) => items.length ? `<div class="tb-grid">${items.map(it => this.itemHtml(it, cur)).join('')}</div>` : '';
+    const thumbs = (items) => items.length ? `<div class="tb-thumbs">${items.map(it => this.itemHtml(it, cur)).join('')}</div>` : '';
+    if (q) {
+      const words = q.split(/\s+/), hit = all.filter(it => words.every(w => `${it.label} ${it.type} ${it.cat} ${it.group || ''}`.toLowerCase().includes(w)));
+      const types = hit.filter(it => it.type !== 'sprite'), spr = hit.filter(it => it.type === 'sprite').slice(0, 48);
+      return hit.length ? (types.length ? '<h4>Results</h4>' + grid(types) : '') + (spr.length ? `<h4>Sprites${hit.length - types.length > 48 ? ' · first 48' : ''}</h4>` + thumbs(spr) : '') : `<p class="tb-hint">Nothing matches “${q.replace(/</g, '&lt;')}”.</p>`;
+    }
+    if (this.cat === 'sprites') {
+      const groups = [...new Set(all.filter(it => it.type === 'sprite').map(it => it.group))];
+      return `<div class="tb-tabs">${groups.map(g => TB.btn(`data-b="agroup" data-g="${g}"`, g, g === TB.assetGroup)).join('')}</div>` + thumbs(all.filter(it => it.type === 'sprite' && it.group === TB.assetGroup));
+    }
+    const cats = this.cat === 'all' ? ['vegetation', 'natural', 'building', 'characters'] : [this.cat];
+    return cats.map(c => (this.cat === 'all' ? `<h4>${BUILD_CATS[c]}</h4>` : '') + grid(all.filter(it => it.type !== 'sprite' && it.cat === c))).join('');
+  },
+  panel() {
+    const m = this.mode, k = this.kind();
+    const kindNote = { line: `drag to draw a line of ${BUILD_LINE[TB.placeType]} m pieces`, scatter: `drag to scatter, about ${BUILD_SCATTER[TB.placeType]} m apart`, single: this.params ? 'tap to place a copy' : 'tap to place' }[k];
+    const slots = [1, 2, 3].map(i => { const s = this.slotInfo(i); return TB.btn(`data-b="save" data-slot="${i}"`, `Save ${i}`) + TB.btn(`data-b="load" data-slot="${i}"${s ? '' : ' disabled'}`, s ? `Load ${i} · ${s.n}` : `Slot ${i} empty`); }).join('');
+    const html = `<div class="tb-grid">${['place', 'erase', 'pick'].map(x => TB.btn(`data-b="mode" data-m="${x}"`, { place: 'Place', erase: 'Erase (X)', pick: 'Pick (I)' }[x], m === x)).join('')}</div>
+<p class="tb-hint">${m === 'place' ? `<b>${this.curLabel()}</b> · ${kindNote}` : m === 'erase' ? 'Tap or drag across objects to remove them' : 'Tap an object to copy its type and settings'}</p>
+<input id="tb-bsearch" type="search" placeholder="Search the catalog" autocomplete="off" value="${this.query.replace(/"/g, '&quot;')}">
+<div class="tb-tabs">${Object.entries(BUILD_CATS).map(([c, l]) => TB.btn(`data-b="cat" data-c="${c}"`, l, !this.query && this.cat === c)).join('')}</div>
+${this.recent.length ? `<h4>Recent</h4><div class="tb-grid">${this.recent.map(key => { const it = this.catalog().find(c => c.key === key); return it ? TB.btn(`data-b="pick" data-key="${key}"`, it.type === 'sprite' ? it.asset.replace(/^(oak|pine|birch|spruce)_/, '') : it.label, this.curKey() === key) : ''; }).join('')}</div>` : ''}
+<div id="tb-bres">${this.listHtml()}</div>
+<h4>Options</h4><div class="tb-grid">${TB.btn('data-b="rot"', `Rotate ${Math.round(TB.placeYaw / DEG)}°`)}${TB.btn('data-b="snap"', 'Snap to grid', TB.snap)}${TB.btn('data-b="overlap"', 'Allow overlap', this.allowOverlap)}</div>
+<h4>History</h4><div class="tb-grid">${TB.btn('data-b="undo"', 'Undo' + (this.undoStack.length ? ` (${this.undoStack.length})` : ''))}${TB.btn('data-b="redo"', 'Redo' + (this.redoStack.length ? ` (${this.redoStack.length})` : ''))}${TB.btn('data-b="clear" class="danger"', 'Clear world')}</div>
+<h4>World file</h4><div class="tb-grid tb-slots">${slots}</div><div class="tb-grid">${TB.btn('data-b="export"', 'Export JSON')}${TB.btn('data-b="import"', 'Import JSON')}</div>
+<p class="tb-hint">Saves keep the layout and terrain; trees regrow intact from their seed.</p>`;
+    return { title: 'Build · ' + { place: 'place', erase: 'erase', pick: 'pick' }[m], html };
+  },
+  filter(q) {
+    this.query = q || '';
+    const el = document.getElementById('tb-bres');
+    if (!el) return;
+    el.innerHTML = this.listHtml();
+    TB.drawThumbs();
+    document.querySelectorAll('#tb-pbody [data-b="cat"]').forEach(b => b.setAttribute('aria-pressed', String(!this.query && b.dataset.c === this.cat)));
+  },
+  click(b) {
+    const d = b.dataset;
+    switch (d.b) {
+      case 'pick': if (this.choose(d.key)) UI.toast(`${this.curLabel()} · ${this.kind() === 'line' ? 'drag to draw a line' : this.kind() === 'scatter' ? 'tap to place, drag to scatter' : 'tap to place'}`); break;
+      case 'mode': this.setMode(d.m); return;
+      case 'cat': this.cat = d.c; this.query = ''; break;
+      case 'agroup': TB.assetGroup = d.g; this.filter(''); return;
+      case 'rot': this.rotate(1); break;
+      case 'snap': TB.snap = !TB.snap; break;
+      case 'overlap': this.allowOverlap = !this.allowOverlap; break;
+      case 'undo': this.undo(); return;
+      case 'redo': this.redo(); return;
+      case 'clear': this.clearWorld(); break;
+      case 'save': this.saveSlot(+d.slot); break;
+      case 'load': this.loadSlot(+d.slot); break;
+      case 'export': this.exportFile(); return;
+      case 'import': this.importFile(); return;
+    }
+    TB.renderPanel();
+  },
+  setMode(m) {
+    this.mode = this.mode === m && m !== 'place' ? 'place' : m;
+    this.clearGhosts();
+    if (TB.tool !== 'build') TB.setTool('build'); else TB.renderPanel();
+    UI.toast({ place: 'Place', erase: 'Erase: tap or drag across objects', pick: 'Pick: tap an object to copy it' }[this.mode]);
+  },
+  rotate(dir) {
+    const step = ObjectTypes[TB.placeType].category === 'building' ? Math.PI / 2 : Math.PI / 4;
+    TB.placeYaw = ((TB.placeYaw + dir * step) % TAU + TAU) % TAU;
+    if (this.hoverScreen) this.hover(this.hoverScreen.x, this.hoverScreen.y);
+  },
+  key(k) {
+    if (k === 'q' || k === 'e' || k === 'r') { this.rotate(k === 'q' ? -1 : 1); if (TB.panel === 'tool') TB.renderPanel(); return true; }
+    if (k === 'x') { this.setMode('erase'); return true; }
+    if (k === 'i') { this.setMode('pick'); return true; }
+    if (k === 'escape' && this.mode !== 'place') { this.setMode('place'); return true; }
+    return false;
+  },
+  // ---- ghosts --------------------------------------------------------------------
+  makeGhost(type, params) {
+    let o;
+    try { o = ObjectTypes[type].create(world, { yaw: TB.placeYaw, params: params ? { ...params } : undefined }); } catch (_) { return null; }
+    const rc = o.c.render;
+    if (rc instanceof RenderComponent) {
+      rc.shadow = 0;
+      rc.build(world);
+      for (const m of rc.meshes) {
+        const M = m.material;
+        M.transparent = true; M.opacity = 0.55; M.depthWrite = false; M.alphaToCoverage = false; M.alphaTest = 0.2; M.needsUpdate = true;
+        m.renderOrder = 5; m.userData.wobj = null;
+      }
+    }
+    return { o, ok: true, why: '' };
+  },
+  disposeGhost(g) { if (g.o.c.render instanceof RenderComponent) g.o.c.render.dispose(); },
+  clearGhosts() { for (const g of this.ghosts) this.disposeGhost(g); this.ghosts = []; this.ghostKey = ''; },
+  ensureGhosts(n, params) {
+    const key = TB.placeType + ':' + (TB.placeType === 'sprite' ? TB.placeAsset : '') + ':' + JSON.stringify(params || null);
+    if (key !== this.ghostKey) { this.clearGhosts(); this.ghostKey = key; }
+    while (this.ghosts.length > n) this.disposeGhost(this.ghosts.pop());
+    while (this.ghosts.length < n) { const g = this.makeGhost(TB.placeType, params); if (!g) break; this.ghosts.push(g); }
+    return this.ghosts;
+  },
+  pose(o, x, z, yaw) {
+    const W = world, t = o.transform;
+    t.position.x = x; t.position.z = z; t.yaw = yaw;
+    const restOn = o.c.construction ? o.c.construction.restOn : 9;
+    t.position.y = o.c.nav ? (W.groundAt(x, z) ?? 0) : W.surfaceAt(x, z, restOn) + t.lift;
+    if (o.c.render) o.c.render.dirty = true;
+  },
+  poseGhost(g, x, z, yaw) { this.pose(g.o, x, z, yaw); const f = this.fit(g.o); g.ok = f.ok; g.why = f.why; },
+  hover(sx, sy) {
+    this.hoverScreen = { x: sx, y: sy };
+    if (TB.act && TB.act.type === 'build' && TB.act.kind !== 'single') return;
+    if (this.mode !== 'place') { if (this.ghosts.length) this.clearGhosts(); return; }
+    const gp = Cam.ground(sx, sy);
+    if (!world.grid.insideWorld(gp.x, gp.z)) { this.clearGhosts(); return; }
+    const yaw = this.kind() === 'line' ? this.lineYaw(1, 0) : TB.placeYaw;
+    const s = TB.snapPos(TB.placeType, gp.x, gp.z, yaw);
+    const [g] = this.ensureGhosts(1, this.params || this.baseParams());
+    if (g) this.poseGhost(g, s.x, s.z, yaw);
+  },
+  sync() {
+    const show = TB.tool === 'build' && this.mode === 'place' && !!(TBDebug.hover || (TB.act && TB.act.type === 'build'));
+    for (const g of this.ghosts) {
+      const rc = g.o.c.render;
+      if (!(rc instanceof RenderComponent)) continue;
+      rc.visible = show; rc.tint = g.ok ? GHOST_OK : GHOST_BAD; rc.dirty = true;
+      rc.sync(world);
+    }
+  },
+  // ---- placement rules -------------------------------------------------------------
+  // A piece fits when it is on the grid, out of the water, and its footprint does
+  // not land on a cell another object already blocks. Building pieces may share
+  // cells with other building pieces (wall corners), but never stack twice.
+  fit(o) {
+    const W = world, g = W.grid, t = o.transform, p = t.position;
+    if (!g.insideWorld(p.x, p.z)) return { ok: false, why: 'outside the grid' };
+    if (this.allowOverlap) return { ok: true, why: '' };
+    if (W.walkDirty) W.rebuildWalkmask();
+    if (g.flags[g.indexAt(p.x, p.z)] & CELL.WATER) return { ok: false, why: 'water' };
+    for (const q of W.objects.values()) {
+      if (q.type !== o.type || Math.hypot(q.transform.position.x - p.x, q.transform.position.z - p.z) > 0.05) continue;
+      const dy = Math.abs(Math.sin(q.transform.yaw - t.yaw));
+      if (!o.c.construction || dy < 0.1) return { ok: false, why: `already a ${o.label.toLowerCase()} here` };
+    }
+    if (!o.c.footprint || !o.c.footprint.enabled) return { ok: true, why: '' };
+    const mine = !!o.c.construction;
+    let why = '';
+    W.footprintCells(o, (n, fl) => {
+      if (why) return;
+      const f = g.flags[n];
+      if (f & CELL.WATER) { why = 'water'; return; }
+      const id = g.obstacle[n];
+      if (!id) return;
+      const other = W.objects.get(id);
+      if (mine && other && other.c.construction) return;
+      const hard = f & CELL.BLOCKED, solid = fl & (CELL.BLOCKED | CELL.BUILDING);
+      if (hard || (solid && f & CELL.PARTIAL)) why = `blocked by ${id}`;
+    });
+    return { ok: !why, why };
+  },
+  tryPlace(type, x, z, yaw, params) {
+    const W = world;
+    W.rebuildLists();
+    if (W.walkDirty) W.rebuildWalkmask();
+    let o;
+    try { o = ObjectTypes[type].create(W, { x, z, yaw, params: params ? { ...params } : undefined }); } catch (e) { return { o: null, why: e.message }; }
+    this.pose(o, x, z, yaw);
+    const f = this.fit(o);
+    if (!f.ok) return { o: null, why: f.why };
+    W.add(o);
+    W.rebuildLists(); W.rebuildWalkmask();
+    return { o, why: '' };
+  },
+  lineYaw(dx, dz) { return (Math.abs(dx) >= Math.abs(dz) ? 0 : Math.PI / 2) + (TB.placeYaw >= Math.PI - 1e-6 ? Math.PI : 0); },
+  // grid-snapped piece centres from a to b along the dominant axis, one per piece length
+  lineSegments(a, b) {
+    const type = TB.placeType, L = BUILD_LINE[type], dx = b.x - a.x, dz = b.z - a.z, alongX = Math.abs(dx) >= Math.abs(dz);
+    const yaw = this.lineYaw(dx, dz), s0 = TB.snapPos(type, a.x, a.z, yaw), along = alongX ? dx : dz, sg = Math.sign(along) || 1;
+    const n = Math.min(40, Math.floor(Math.abs(along) / L + 0.5) + 1), out = [];
+    for (let k = 0; k < n; k++) out.push({ x: s0.x + (alongX ? sg * k * L : 0), z: s0.z + (alongX ? 0 : sg * k * L), yaw });
+    return out;
+  },
+  // ---- acts (world space; the pointer layer below converts screen points) ------------
+  beginAt(x, z, id = 0) {
+    const a = { id, type: 'build', mode: this.mode, kind: this.kind(), start: { x, z }, last: { x, z }, cur: { x, z }, made: [], removed: [], removedIds: new Set(), pan: false };
+    if (a.kind === 'line') this.lineTo(a, x, z);
+    return a;
+  },
+  lineTo(a, x, z) {
+    a.cur = { x, z };
+    const segs = this.lineSegments(a.start, a.cur), gs = this.ensureGhosts(segs.length, this.baseParams());
+    segs.forEach((s, i) => gs[i] && this.poseGhost(gs[i], s.x, s.z, s.yaw));
+  },
+  scatterTo(a, x, z) {
+    const sp = BUILD_SCATTER[TB.placeType] || 1.5;
+    if (!a.made.length && !a.scattered) { a.scattered = true; this.scatterOne(a, a.start.x, a.start.z); }
+    let d = Math.hypot(x - a.last.x, z - a.last.z);
+    while (d >= sp) {
+      const k = sp / d, px = lerp(a.last.x, x, k), pz = lerp(a.last.z, z, k);
+      a.last = { x: px, z: pz };
+      this.scatterOne(a, px, pz);
+      d = Math.hypot(x - px, z - pz);
+    }
+  },
+  scatterOne(a, x, z) {
+    const W = world, type = TB.placeType, sp = BUILD_SCATTER[type] || 1.5, j = sp * 0.3;
+    const yaw = BUILD_SPIN.has(type) ? W.rand() * TAU : TB.placeYaw;
+    const r = this.tryPlace(type, x + (W.rand() * 2 - 1) * j, z + (W.rand() * 2 - 1) * j, yaw, this.baseParams());
+    if (r.o) a.made.push(r.o);
+  },
+  endAt(a, x, z) {
+    const type = TB.placeType;
+    if (a.kind === 'line') {
+      this.lineTo(a, x, z);
+      const segs = this.lineSegments(a.start, a.cur);
+      let skipped = 0;
+      for (const s of segs) { const r = this.tryPlace(type, s.x, s.z, s.yaw, this.baseParams()); if (r.o) a.made.push(r.o); else skipped++; }
+      this.clearGhosts();
+      if (a.made.length || skipped) UI.toast(`${a.made.length} × ${this.curLabel()}${skipped ? ` · ${skipped} blocked` : ''}`);
+    } else if (a.kind === 'scatter') {
+      if (!a.scattered) this.placeSingle(a, x, z);
+      else UI.toast(`Scattered ${a.made.length} × ${this.curLabel()}`);
+    } else if (a.kind === 'single') this.placeSingle(a, x, z);
+    this.commit(a);
+  },
+  placeSingle(a, x, z) {
+    const W = world, type = TB.placeType, yaw = TB.placeYaw;
+    if (!W.grid.insideWorld(x, z)) { UI.toast('Outside the world grid'); return null; }
+    const s = TB.snapPos(type, x, z, yaw);
+    const [g] = this.ensureGhosts(1, this.params || this.baseParams());
+    const params = g ? g.o.params : (this.params || this.baseParams());
+    const r = this.tryPlace(type, s.x, s.z, yaw, params);
+    if (!r.o) { UI.toast(`Can't place ${this.curLabel()} here: ${r.why}`); return null; }
+    a.made.push(r.o);
+    if (!this.params) this.clearGhosts();     // next ghost rolls a new variant / seed
+    const c = W.grid.cellAt(s.x, s.z);
+    UI.toast(`${r.o.label} ${r.o.id} · cell ${c.i},${c.j}`);
+    return r.o;
+  },
+  commit(a) {
+    if (a.made.length) this.push({ label: `Build ${a.made.length} × ${this.curLabel()}`, add: a.made.filter(o => o.alive).map(o => this.rec(o)) });
+    if (a.removed.length) this.push({ label: `Erase ${a.removed.length}`, del: a.removed });
+  },
+  erasable(o) { return !!o && o.alive && o !== world.playerObj && o.type !== 'player' && o.type !== 'debris' && o.type !== 'fragment'; },
+  eraseOne(a, o) {
+    if (!this.erasable(o) || a.removedIds.has(o.id)) return;
+    a.removed.push(this.rec(o)); a.removedIds.add(o.id);
+    world.remove(o);
+    world.rebuildLists(); world.rebuildWalkmask();
+  },
+  erase(objs, label = 'Erase') {
+    const a = { made: [], removed: [], removedIds: new Set() };
+    for (const o of objs) {
+      if (this.erasable(o)) this.eraseOne(a, o);
+      else if (o && o.alive && o !== world.playerObj) { world.remove(o); world.rebuildLists(); world.rebuildWalkmask(); }   // debris: gone for good, it can't be respawned
+    }
+    if (a.removed.length) { this.push({ label: `${label} ${a.removed.map(r => r.id).join(', ')}`, del: a.removed }); UI.toast(`${label}: ${a.removed.length} removed · Ctrl+Z to undo`); }
+    TB.select(null);
+  },
+  eyedrop(o) {
+    if (!o || o === world.playerObj || !(ObjectTypes[o.type].palette || o.type === 'sprite')) { UI.toast('Nothing to pick there'); return false; }
+    const r = this.rec(o);
+    TB.placeType = o.type;
+    if (o.type === 'sprite') TB.placeAsset = r.params.asset;
+    delete r.params.behavior;
+    this.params = r.params;
+    TB.placeYaw = ((r.yaw % TAU) + TAU) % TAU;
+    this.mode = 'place';
+    this.clearGhosts();
+    UI.toast(`Picked ${o.label}${r.params.seed ? ' seed ' + r.params.seed : ''} · tap to place a copy`);
+    TB.renderPanel();
+    return true;
+  },
+  // ---- pointer layer ------------------------------------------------------------------
+  begin(p) {
+    const gp = Cam.ground(p.x, p.y), a = this.beginAt(gp.x, gp.z, p.id);
+    if (a.mode === 'erase') this.eraseOne(a, TB.pick(p.x, p.y));
+    if (a.kind === 'single') this.hover(p.x, p.y);
+    return a;
+  },
+  move(a, p, dx, dy) {
+    if (a.pan) { Cam.pan(dx, dy); return; }
+    if (a.mode === 'erase') { this.eraseOne(a, TB.pick(p.x, p.y)); return; }
+    if ((a.kind === 'single' || a.kind === 'pick') && p.moved > 8) { a.pan = true; return; }
+    const gp = Cam.ground(p.x, p.y);
+    if (a.kind === 'line') this.lineTo(a, gp.x, gp.z);
+    else if (a.kind === 'scatter' && p.moved > 8) this.scatterTo(a, gp.x, gp.z);
+  },
+  end(a, p) {
+    if (a.mode === 'pick') { if (!a.pan) this.eyedrop(TB.pick(p.x, p.y)); return; }
+    if (a.mode === 'erase') { this.commit(a); if (a.removed.length) UI.toast(`Erased ${a.removed.length} · Ctrl+Z to undo`); return; }
+    if (a.pan) { this.commit(a); return; }
+    const gp = Cam.ground(p.x, p.y);
+    this.endAt(a, gp.x, gp.z);
+  },
+  cancel(a) { if (a.kind === 'line') this.clearGhosts(); this.commit(a); },
+  // ---- records, history -----------------------------------------------------------------
+  rec(o) {
+    const t = o.transform, p = t.position;
+    const params = o.c.tree ? { ...o.c.tree.params } : JSON.parse(JSON.stringify(o.params || {}));
+    if (o.c.nav) params.behavior = o.c.nav.behavior;
+    return { type: o.type, id: o.id, x: +p.x.toFixed(4), z: +p.z.toFixed(4), yaw: +t.yaw.toFixed(5), scale: +t.scale.toFixed(4), lift: +t.lift.toFixed(4), params };
+  },
+  respawn(r) {
+    const m = /_(\d+)$/.exec(r.id);
+    if (m) objSerial = Math.max(objSerial, +m[1]);        // later spawns never reuse a restored id
+    if (world.objects.has(r.id)) return null;
+    return world.spawn(r.type, { id: r.id, x: r.x, z: r.z, yaw: r.yaw, scale: r.scale, lift: r.lift, params: JSON.parse(JSON.stringify(r.params || {})) });
+  },
+  terrainSnap() { const g = world.grid; return { cols: g.cols, rows: g.rows, cs: g.cs, h: Float32Array.from(g.height), t: Uint8Array.from(g.terrain) }; },
+  terrainApply(s) {
+    const W = world, g = W.grid;
+    if (s.cols !== g.cols || s.rows !== g.rows || s.cs !== g.cs) return false;
+    g.height.set(s.h); g.terrain.set(s.t);
+    W.terrainChanged();
+    return true;
+  },
+  push(cmd) {
+    cmd = { label: cmd.label, add: cmd.add || [], del: cmd.del || [], moves: cmd.moves || [], terrain: cmd.terrain || null };
+    if (cmd.terrain) {
+      const { before: b, after: a } = cmd.terrain;
+      let same = b.h.length === a.h.length;
+      for (let i = 0; same && i < b.h.length; i++) if (b.h[i] !== a.h[i] || b.t[i] !== a.t[i]) same = false;
+      if (same) cmd.terrain = null;
+    }
+    if (!cmd.add.length && !cmd.del.length && !cmd.moves.length && !cmd.terrain) return;
+    this.undoStack.push(cmd);
+    if (this.undoStack.length > 80) this.undoStack.shift();
+    this.redoStack = [];
+    world.log(cmd.label);
+    if (TB.panel === 'tool' && (TB.tool === 'build' || TB.tool === 'terrain')) TB.renderPanel();
+  },
+  apply(cmd, undo) {
+    const W = world, add = undo ? cmd.del : cmd.add, del = undo ? cmd.add : cmd.del;
+    for (const r of del) { const o = W.objects.get(r.id); if (o) W.remove(o); }
+    if (cmd.terrain && !this.terrainApply(undo ? cmd.terrain.before : cmd.terrain.after)) UI.toast('Grid size changed since that stroke; terrain not restored');
+    for (const r of add) { try { this.respawn(r); } catch (e) { console.warn('respawn', r, e); } }
+    for (const m of cmd.moves) { const o = W.objects.get(m.id), q = undo ? m.from : m.to; if (o) W.moveObject(o, q.x, q.z); }
+    W.rebuildLists(); W.settleAll(); W.rebuildWalkmask();
+  },
+  undo() {
+    const c = this.undoStack.pop();
+    if (!c) { UI.toast('Nothing to undo'); return; }
+    TB.select(null);
+    this.apply(c, true); this.redoStack.push(c);
+    UI.toast('Undo: ' + c.label);
+    TB.refresh();
+  },
+  redo() {
+    const c = this.redoStack.pop();
+    if (!c) { UI.toast('Nothing to redo'); return; }
+    TB.select(null);
+    this.apply(c, false); this.undoStack.push(c);
+    UI.toast('Redo: ' + c.label);
+    TB.refresh();
+  },
+  clearWorld() {
+    const W = world, objs = [...W.objects.values()].filter(o => this.erasable(o)), before = this.terrainSnap();
+    const del = objs.map(o => this.rec(o));
+    for (const o of objs) W.remove(o);
+    W.resetTerrain();
+    W.rebuildLists(); W.settleAll(); W.rebuildWalkmask();
+    this.push({ label: `Clear world (${del.length} objects)`, del, terrain: { before, after: this.terrainSnap() } });
+    UI.toast(`Cleared ${del.length} objects · Ctrl+Z to undo`);
+  },
+  // ---- save / load ----------------------------------------------------------------------
+  serialize() {
+    const W = world, g = W.grid, pp = W.playerObj && W.playerObj.transform.position;
+    return {
+      format: BUILD_FORMAT, version: 1, saved: new Date().toISOString(),
+      grid: { cols: g.cols, rows: g.rows, cellSize: g.cs, origin: { ...g.origin } },
+      terrainTypes: TERRAIN_TYPES.map(t => t.id),
+      height: Array.from(g.height, v => Math.round(v * 1e4) / 1e4),
+      terrain: Array.from(g.terrain).join(''),
+      player: pp ? { x: +pp.x.toFixed(3), z: +pp.z.toFixed(3) } : null,
+      objects: [...W.objects.values()].filter(o => this.erasable(o)).map(o => this.rec(o)),
+    };
+  },
+  load(data) {
+    if (!data || data.format !== BUILD_FORMAT) throw new Error('not an Environmental Engine world file');
+    const W = world, gc = data.grid, N = gc.cols * gc.rows;
+    if (!(gc.cols > 0 && gc.rows > 0 && gc.cellSize > 0) || data.height.length !== N || data.terrain.length !== N) throw new Error('grid data does not match its size');
+    TB.select(null);
+    this.reset();
+    const g0 = W.grid;
+    if (g0.cols !== gc.cols || g0.rows !== gc.rows || g0.cs !== gc.cellSize || g0.origin.x !== gc.origin.x || g0.origin.z !== gc.origin.z) W.regrid({ cols: gc.cols, rows: gc.rows, cellSize: gc.cellSize, origin: gc.origin });
+    W.clearAll();
+    W.scenario = null;
+    const g = W.grid;
+    for (let n = 0; n < N; n++) {
+      g.height[n] = clamp(+data.height[n] || 0, -1.2, 3);
+      const id = data.terrainTypes[+data.terrain[n]];
+      g.terrain[n] = TERRAIN[id] ?? TERRAIN.grass;
+    }
+    W.terrainChanged();
+    let made = 0, skipped = 0;
+    for (const r of data.objects) {
+      if (!ObjectTypes[r.type] || r.type === 'player' || r.type === 'debris' || r.type === 'fragment') { skipped++; continue; }
+      try { if (this.respawn(r)) made++; else skipped++; } catch (e) { skipped++; console.warn('load', r, e); }
+    }
+    const pl = data.player || { x: g.origin.x + g.width / 2, z: g.origin.z + g.depth * 0.66 };
+    W.playerObj = W.spawn('player', { x: pl.x, z: pl.z });
+    W.rebuildLists(); W.settleAll(); W.rebuildWalkmask();
+    W.log(`Loaded world: ${made} objects${skipped ? `, ${skipped} skipped` : ''}`);
+    TB.refresh();
+    return { made, skipped };
+  },
+  slotInfo(i) {
+    try { const s = localStorage.getItem(BUILD_SLOT + i); if (!s) return null; const d = JSON.parse(s); return { n: d.objects.length, saved: d.saved }; } catch (_) { return null; }
+  },
+  saveSlot(i) {
+    try { const d = this.serialize(); localStorage.setItem(BUILD_SLOT + i, JSON.stringify(d)); UI.toast(`Saved to slot ${i}: ${d.objects.length} objects`); }
+    catch (e) { UI.toast('Could not save: ' + e.message + ' · try Export JSON'); }
+  },
+  loadSlot(i) {
+    try { const s = localStorage.getItem(BUILD_SLOT + i); if (!s) { UI.toast(`Slot ${i} is empty`); return; } const r = this.load(JSON.parse(s)); UI.toast(`Loaded slot ${i}: ${r.made} objects${r.skipped ? ` (${r.skipped} skipped)` : ''}`); }
+    catch (e) { UI.toast('Could not load: ' + e.message); }
+  },
+  exportFile() {
+    const d = this.serialize(), url = URL.createObjectURL(new Blob([JSON.stringify(d)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = `world-${d.saved.slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    UI.toast(`Exported ${d.objects.length} objects`);
+  },
+  importFile() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json,application/json';
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      try { const r = this.load(JSON.parse(await f.text())); UI.toast(`Imported ${f.name}: ${r.made} objects${r.skipped ? ` (${r.skipped} skipped)` : ''}`); }
+      catch (e) { UI.toast('Could not import: ' + e.message); }
+    });
+    inp.click();
+  },
+  // ---- overlay ---------------------------------------------------------------------------
+  draw(g, D) {
+    const W = world;
+    if (this.mode === 'place') {
+      for (const gh of this.ghosts) {
+        const o = gh.o, t = o.transform, col = gh.ok ? '#5ccc5c' : '#ee3326';
+        const fp = o.c.footprint;
+        if (fp && fp.enabled) for (const sh of fp.shapes) {
+          D.poly(g, shapeOutline(sh, t, t.position.y - t.lift + 0.03));
+          g.globalAlpha = 0.25; g.fillStyle = col; g.fill();
+          g.globalAlpha = 1; g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+        } else {
+          const pts = [];
+          for (let i = 0; i < 16; i++) { const an = i / 16 * TAU; pts.push(new Vector3(t.position.x + Math.cos(an) * 0.3, t.position.y + 0.03, t.position.z + Math.sin(an) * 0.3)); }
+          D.poly(g, pts); g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+        }
+        if (!gh.ok && gh === this.ghosts[0]) {
+          const s = D.S(t.position), txt = gh.why;
+          g.font = '600 12px system-ui, sans-serif';
+          g.fillStyle = 'rgba(120,20,14,0.85)'; g.fillRect(s.x + 10, s.y - 22, g.measureText(txt).width + 10, 18);
+          g.fillStyle = '#fff'; g.fillText(txt, s.x + 15, s.y - 9);
+        }
+      }
+      const a = TB.act;
+      if (a && a.type === 'build' && a.kind === 'line' && this.ghosts.length) {
+        const last = this.ghosts[this.ghosts.length - 1].o.transform.position, s = D.S(last), ok = this.ghosts.filter(x => x.ok).length;
+        const txt = `${ok} × ${this.curLabel()} · ${(this.ghosts.length * BUILD_LINE[TB.placeType]).toFixed(0)} m`;
+        g.font = '600 12px system-ui, sans-serif';
+        g.fillStyle = 'rgba(20,28,22,0.8)'; g.fillRect(s.x + 10, s.y + 6, g.measureText(txt).width + 10, 18);
+        g.fillStyle = '#fff'; g.fillText(txt, s.x + 15, s.y + 19);
+      }
+    } else if (this.hoverScreen && TBDebug.hover) {
+      const o = TB.pick(this.hoverScreen.x, this.hoverScreen.y), r = o && TBDebug.screenRect(o);
+      if (r && (this.mode === 'pick' || this.erasable(o))) {
+        g.strokeStyle = this.mode === 'erase' ? '#ee3326' : '#408cff'; g.lineWidth = 2; g.setLineDash([5, 3]);
+        g.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); g.setLineDash([]);
+      }
+    }
+    void W;
+  },
+};
+
+/* --------------------------------------------------------- build self-test */
+const BuildTest = {
+  async run() {
+    const W = world, res = [], prev = W.scenario || 'sandbox';
+    const saved = { type: TB.placeType, asset: TB.placeAsset, yaw: TB.placeYaw, snap: TB.snap, mode: Build.mode, params: Build.params, overlap: Build.allowOverlap };
+    const ok = (n, pass, note) => { res.push(`${pass ? 'PASS' : 'FAIL'} ${String(n).padStart(2)} ${note}`); TB.report = ['BUILD SELF-TEST', ...res].join('\n'); const el = document.getElementById('tb-report'); if (el) el.textContent = TB.report; };
+    const count = (t) => [...W.objects.values()].filter(o => o.type === t).length;
+    const sum = () => { let s = 0; const g = W.grid; for (let n = 0; n < g.N; n++) s += g.height[n] * (n % 97 + 1) + g.terrain[n] * 0.37; return s; };
+    const use = (key) => { Build.choose(key); TB.placeYaw = 0; };
+    const act = (pts) => { const a = Build.beginAt(pts[0][0], pts[0][1]); for (const [x, z] of pts.slice(1)) Build.kind() === 'line' ? Build.lineTo(a, x, z) : Build.scatterTo(a, x, z); Build.endAt(a, ...pts[pts.length - 1]); return a; };
+    try {
+      W.loadScenario('empty');
+      TB.snap = true; Build.allowOverlap = false; Build.mode = 'place';
+      const cat = Build.catalog(), types = cat.filter(c => c.type !== 'sprite');
+      Build.query = 'rock';
+      const hits = (Build.listHtml().match(/data-b="pick"/g) || []).length;
+      Build.query = '';
+      ok(1, types.length >= 20 && cat.length > types.length + 100 && hits >= 3, `catalog: ${types.length} object types + ${cat.length - types.length} sprites; "rock" finds ${hits}`);
+
+      use('rock_m');
+      const a1 = act([[6.1, 6.1]]), r1 = a1.made[0];
+      const g1 = W.grid.cellAt(6.1, 6.1);
+      ok(2, !!r1 && Math.abs(r1.transform.position.x - W.grid.centerX(g1.i)) < 1e-6 && r1.params.variant != null && Build.undoStack.length === 1, `tap places ${r1 ? r1.id : 'nothing'} on a cell centre, variant ${r1 ? r1.params.variant : '?'} recorded, 1 undo step`);
+
+      const n0 = count('rock_m'), a2 = act([[6.1, 6.1]]);
+      ok(3, a2.made.length === 0 && count('rock_m') === n0, 'a second rock on the same cell is refused');
+
+      use('wall');
+      const a3 = act([[4.1, 10], [11.9, 10.2]]);
+      const xs = a3.made.map(o => o.transform.position.x).sort((p, q) => p - q);
+      const contiguous = xs.every((x, i) => i === 0 || Math.abs(x - xs[i - 1] - 2) < 1e-6);
+      const a4 = act([[16.25, 4], [16.4, 9.9]]);
+      ok(4, a3.made.length === 5 && contiguous && a3.made.every(o => o.transform.yaw === 0) && a4.made.length === 4 && a4.made.every(o => Math.abs(o.transform.yaw - Math.PI / 2) < 1e-6),
+        `wall line: ${a3.made.length} pieces along X (2 m apart), ${a4.made.length} along Z (yaw 90°)`);
+
+      W.rebuildWalkmask();
+      const path = W.nav.find(8, 8, 8, 12);
+      ok(5, !!path && !W.nav.clear({ x: 8, z: 8 }, { x: 8, z: 12 }), `the built wall blocks the walkmask: path ${path ? path.length + ' waypoints around' : 'none'}`);
+
+      use('bush');
+      const u0 = Build.undoStack.length, a5 = act([[2, 16], [6, 16], [10, 16], [14, 16], [18, 16]]);
+      const bushes = a5.made;
+      let close = 0;
+      for (let i = 0; i < bushes.length; i++) for (let j = i + 1; j < bushes.length; j++) if (Math.hypot(bushes[i].transform.position.x - bushes[j].transform.position.x, bushes[i].transform.position.z - bushes[j].transform.position.z) < 0.3) close++;
+      ok(6, bushes.length >= 8 && bushes.length <= 14 && close === 0 && Build.undoStack.length === u0 + 1, `scatter along 16 m: ${bushes.length} bushes, none stacked, one undo step`);
+
+      const ids = bushes.map(o => o.id), nb = count('bush');
+      Build.undo();
+      const gone = count('bush') === nb - ids.length;
+      Build.redo();
+      ok(7, gone && ids.every(id => W.objects.has(id)) && count('bush') === nb, `undo removes the ${ids.length} bushes, redo restores the same ids`);
+
+      const wall = a3.made[2], wid = wall.id, wp = wall.transform.position.clone();
+      Build.erase([wall]);
+      const erased = !W.objects.has(wid);
+      Build.undo();
+      const back = W.objects.get(wid);
+      ok(8, erased && !!back && back.transform.position.distanceTo(wp) < 1e-3 && back.type === 'wall', `erase ${wid} then undo: same id, type and position`);
+
+      const h0 = sum(), before = Build.terrainSnap();
+      W.brush(20, 20, 'raise', 1.6); W.brush(20, 20, 'raise', 1.6); W.brush(19, 21, 'water', 0.9);
+      Build.push({ label: 'test stroke', terrain: { before, after: Build.terrainSnap() } });
+      const h1 = sum();
+      Build.undo();
+      const h2 = sum();
+      Build.redo();
+      ok(9, h1 !== h0 && Math.abs(h2 - h0) < 1e-6 && Math.abs(sum() - h1) < 1e-6, 'terrain stroke undo restores every cell exactly; redo reapplies it');
+
+      use('rock_s');
+      const a10 = act([[19, 21]]);
+      ok(10, a10.made.length === 0, 'nothing is placed in water');
+
+      use('pine');
+      const pine = act([[22, 6]]).made[0];
+      Build.mode = 'pick';
+      Build.eyedrop(pine);
+      const a11 = act([[3, 3]]), copy = a11.made[0];
+      ok(11, !!copy && copy.type === 'pine' && copy.c.tree.params.seed === pine.c.tree.params.seed && Build.kind() === 'single', `pick copies ${pine.id} (seed ${pine.c.tree.params.seed}) → ${copy ? copy.id : 'none'}`);
+
+      const before12 = Build.serialize(), nObj = before12.objects.length, terr = Build.terrainSnap();
+      W.loadScenario('sandbox');
+      const r12 = Build.load(JSON.parse(JSON.stringify(before12))), after12 = Build.serialize();
+      const same = after12.objects.length === nObj && before12.objects.every(o => { const q = after12.objects.find(p => p.id === o.id); return q && q.type === o.type && Math.abs(q.x - o.x) < 1e-3 && Math.abs(q.z - o.z) < 1e-3 && (o.params.seed == null || q.params.seed === o.params.seed) && (o.params.variant == null || q.params.variant === o.params.variant); });
+      const fresh = W.spawn('rock_s', { x: 1.25, z: 22.75 });
+      const now12 = Build.terrainSnap();
+      let dh = 0, dt = 0;
+      for (let n = 0; n < terr.h.length; n++) { dh = Math.max(dh, Math.abs(now12.h[n] - terr.h[n])); if (now12.t[n] !== terr.t[n]) dt++; }
+      ok(12, r12.made === nObj && same && dh < 1e-4 && dt === 0 && !before12.objects.some(o => o.id === fresh.id), `save → load round trip: ${nObj} objects, ids/positions/seeds/variants and terrain match; new ids don't collide`);
+
+      use('fence');
+      const a13 = act([[2.1, 20.3], [8.1, 20.3]]), oak = W.spawn('oak', { x: 12, z: 20.25, params: { seed: 3 } });
+      W.rebuildLists(); W.rebuildWalkmask();
+      const a13b = act([[10.1, 20.3], [16.1, 20.3]]);
+      ok(13, a13.made.length === 4 && a13.made.every(o => o.c.footprint.cells.length >= 4) && !W.nav.clear({ x: 5, z: 19.4 }, { x: 5, z: 21.2 }) && a13b.made.length === 3 && !!oak,
+        `fence line: ${a13.made.length} pieces, each blocks ${a13.made[0] ? a13.made[0].c.footprint.cells.length : 0} cells; across a tree ${a13b.made.length} of 4 placed`);
+    } catch (err) { ok(99, false, 'error: ' + err.message); console.warn(err); }
+    Object.assign(TB, { placeType: saved.type, placeAsset: saved.asset, placeYaw: saved.yaw, snap: saved.snap });
+    Object.assign(Build, { mode: saved.mode, params: saved.params, allowOverlap: saved.overlap });
+    W.loadScenario(prev);
+    TB.openPanel('debug');
+    return res;
+  },
+};
 
 /* ------------------------------------------------------------ self-test */
 const TBTest = {
@@ -6852,7 +7542,7 @@ async function mainWorld(mode) {
     R.resize();
     world.loadScenario('sandbox');
     if (mode === 'assets') { TB.assetGroup = 'pine'; TB.openPanel('assets'); }
-    window.EE = { world, R, Cam, cameraConfig, GRID_CONFIG, AssetRegistry, ObjectTypes, Scenarios, TB, TBDebug, TBTest, CELL, TREE_SPECIES, growTree, Debug };
+    window.EE = { world, R, Cam, cameraConfig, GRID_CONFIG, AssetRegistry, ObjectTypes, Scenarios, TB, TBDebug, TBTest, Build, BuildTest, CELL, TREE_SPECIES, growTree, Debug };
     window.addEventListener('resize', () => { R.resize(); Overlay.resize(); });
     const stop = (e) => { if (!e.target.closest || !e.target.closest('#dbg, .tb-scroll')) e.preventDefault(); };
     document.addEventListener('touchmove', stop, { passive: false });

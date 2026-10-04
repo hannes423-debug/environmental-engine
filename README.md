@@ -26,11 +26,18 @@ python3 -m http.server 8000
 - Slash limbs off, throw rocks, fell trunks through a notch, then buck the
   fallen log into pieces. Cuts clip the same sprite live and add sawn faces.
 - Wind, rain, particles, rigid-body debris.
+- Build mode in the world testbed (the Terra builder): a searchable catalog,
+  translucent ghosts that turn red where a piece can't go (blocked cells,
+  water, off the grid), walls and fences dragged into lines, plants and rocks
+  dragged into a scatter, erase and pick (eyedropper) modes, undo / redo for
+  builds, terrain strokes and moves (Ctrl+Z / Ctrl+Y), three save slots and
+  JSON export / import. Keys: B or 8 opens it, Q/E rotate, X erase, I pick.
 
 ## Self-tests
 
 - Lab: Debug › Self-test (19 steps, including felling).
 - World testbed (`#world`): Debug › Self-test (12 steps).
+- Build mode (`#world`): Debug › Build test (13 steps).
 
 ## Art pipeline
 
